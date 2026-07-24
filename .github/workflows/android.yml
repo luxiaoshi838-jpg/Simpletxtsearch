@@ -1,0 +1,73 @@
+name: Android build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle 8.2.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.2.1"
+
+      - name: Debug unit tests
+        run: |
+          set +e
+          timeout --signal=INT 5m gradle testDebugUnitTest --stacktrace --console=plain > /tmp/test-debug.log 2>&1
+          code=$?
+          tail -n 180 /tmp/test-debug.log
+          exit $code
+
+      - name: Assemble debug
+        run: |
+          set +e
+          timeout --signal=INT 5m gradle assembleDebug --stacktrace --console=plain > /tmp/assemble-debug.log 2>&1
+          code=$?
+          tail -n 180 /tmp/assemble-debug.log
+          exit $code
+
+      - name: Assemble release
+        run: |
+          set +e
+          timeout --signal=INT 5m gradle assembleRelease --stacktrace --console=plain > /tmp/assemble-release.log 2>&1
+          code=$?
+          tail -n 180 /tmp/assemble-release.log
+          exit $code
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: Simpletxtsearch-${{ github.run_number }}
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Simpletxtsearch-logs-${{ github.run_number }}
+          path: /tmp/*.log
+          if-no-files-found: warn
+          retention-days: 3
