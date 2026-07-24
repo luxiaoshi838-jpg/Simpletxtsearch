@@ -18,9 +18,9 @@ android {
     namespace = "com.luxiaoshi.simpletxtsearch"
     compileSdk = 35
 
-    val generatedVersionCode = (System.getenv("SIMPLETXTSEARCH_VERSION_CODE") ?: "2026072401")
-        .toIntOrNull() ?: 2026072401
-    val generatedVersionName = System.getenv("SIMPLETXTSEARCH_VERSION_NAME") ?: "1.0.0"
+    val generatedVersionCode = (System.getenv("SIMPLETXTSEARCH_VERSION_CODE") ?: "2026072402")
+        .toIntOrNull() ?: 2026072402
+    val generatedVersionName = System.getenv("SIMPLETXTSEARCH_VERSION_NAME") ?: "1.1.0"
 
     defaultConfig {
         applicationId = "com.luxiaoshi.simpletxtsearch"
@@ -29,6 +29,7 @@ android {
         versionCode = generatedVersionCode
         versionName = generatedVersionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        multiDexEnabled = true
     }
 
     signingConfigs {
@@ -69,6 +70,22 @@ android {
     testOptions {
         unitTests.isIncludeAndroidResources = true
     }
+
+    packaging {
+        resources {
+            excludes += setOf(
+                "META-INF/DEPENDENCIES",
+                "META-INF/LICENSE",
+                "META-INF/LICENSE.txt",
+                "META-INF/NOTICE",
+                "META-INF/NOTICE.txt",
+                "META-INF/INDEX.LIST",
+                "META-INF/*.SF",
+                "META-INF/*.DSA",
+                "META-INF/*.RSA"
+            )
+        }
+    }
 }
 
 dependencies {
@@ -78,6 +95,9 @@ dependencies {
     implementation("androidx.documentfile:documentfile:1.0.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     implementation("com.github.albfernandez:juniversalchardet:2.5.0")
+
+    implementation("com.tom-roush:pdfbox-android:2.0.27.0")
+    implementation("com.github.SUPERCILEX.poi-android:poi:3.17")
 
     testImplementation("junit:junit:4.13.2")
 }
