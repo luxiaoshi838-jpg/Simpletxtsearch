@@ -23,14 +23,15 @@ enum class SearchFileType(
         }
 
         fun parseNames(names: Collection<String>?): Set<SearchFileType> {
-            if (names.isNullOrEmpty()) return defaultSelection
+            if (names == null) return defaultSelection
             return names.mapNotNullTo(linkedSetOf()) { saved ->
                 entries.firstOrNull { it.name == saved }
-            }.ifEmpty { defaultSelection }
+            }
         }
 
         fun labels(types: Set<SearchFileType>): String {
             if (types.containsAll(defaultSelection)) return "全部"
+            if (types.isEmpty()) return "未选择"
             return entries.filter { it in types }.joinToString("、") { it.label }
         }
     }
