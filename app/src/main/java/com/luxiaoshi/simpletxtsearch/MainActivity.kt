@@ -26,6 +26,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.widget.doAfterTextChanged
 import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
@@ -39,12 +40,15 @@ class MainActivity : AppCompatActivity() {
     private var rootUri: Uri? = null
     private var folderChoices = emptyList<FolderChoice>()
     private var selectedFolderUris = mutableSetOf<String>()
+    private var selectedFileTypes = SearchFileType.defaultSelection.toMutableSet()
 
     private lateinit var folderText: TextView
     private lateinit var rangeText: TextView
+    private lateinit var typeText: TextView
     private lateinit var keywordInput: EditText
     private lateinit var caseSensitiveCheck: CheckBox
     private lateinit var chooseRangeButton: Button
+    private lateinit var chooseTypesButton: Button
     private lateinit var startButton: Button
     private lateinit var stopButton: Button
     private lateinit var statusText: TextView
@@ -81,6 +85,26 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(buildContentView())
 
+        selectedFileTypes = SearchFileType.parseNames(
+            prefs.getStringSet(KEY_SELECTED_TYPES, emptySet())
+        ).toMutableSet()
+        updateTypeSummary()
+
+        val snapshot = SearchStore.snapshot(this)
+        val savedKeyword = prefs.getString(KEY_KEYWORD, null)
+            ?.takeIf { it.isNotEmpty() }
+            ?: snapshot.keyword
+        keywordInput.setText(savedKeyword)
+        keywordInput.setSelection(keywordInput.text.length)
+        caseSensitiveCheck.isChecked = prefs.getBoolean(KEY_CASE_SENSITIVE, false)
+
+        keywordInput.doAfterTextChanged { value ->
+            prefs.edit().putString(KEY_KEYWORD, value?.toString().orEmpty()).apply()
+        }
+        caseSensitiveCheck.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean(KEY_CASE_SENSITIVE, checked).apply()
+        }
+
         prefs.getString(KEY_ROOT_URI, null)?.let { saved ->
             rootUri = Uri.parse(saved)
             loadFolderChoices(showDialog = false, forceSelectAll = false)
@@ -101,6 +125,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onStop() {
+        prefs.edit()
+            .putString(KEY_KEYWORD, keywordInput.text.toString())
+            .putBoolean(KEY_CASE_SENSITIVE, caseSensitiveCheck.isChecked)
+            .putStringSet(KEY_SELECTED_TYPES, selectedFileTypes.mapTo(linkedSetOf()) { it.name })
+            .apply()
         runCatching { unregisterReceiver(progressReceiver) }
         super.onStop()
     }
@@ -118,17 +147,16 @@ class MainActivity : AppCompatActivity() {
             setTextColor(Color.rgb(35, 67, 95))
         })
         root.addView(TextView(this).apply {
-            text = "后台搜索指定文件夹中的 TXT，命中一次就搜索下一个文件"
+            text = "后台搜索 TXT、PDF、文档和表格；每个文件首次命中后立即搜索下一个"
             textSize = 14f
             setTextColor(Color.rgb(95, 95, 95))
             setPadding(0, dp(4), 0, dp(14))
         })
 
-        val chooseFolderButton = Button(this).apply {
+        root.addView(Button(this).apply {
             text = "选择总文件夹"
             setOnClickListener { chooseFolder.launch(rootUri) }
-        }
-        root.addView(chooseFolderButton, matchWrap())
+        }, matchWrap())
 
         folderText = TextView(this).apply {
             text = "尚未选择文件夹"
@@ -141,16 +169,29 @@ class MainActivity : AppCompatActivity() {
         chooseRangeButton = Button(this).apply {
             text = "选择参与搜索的子文件夹"
             isEnabled = false
-            setOnClickListener { loadFolderChoices(showDialog = true, forceSelectAll = false) }
+            setOnClickListener { showFolderSelectionDialog() }
         }
         root.addView(chooseRangeButton, matchWrap())
 
         rangeText = TextView(this).apply {
             textSize = 14f
             setTextColor(Color.rgb(85, 85, 85))
-            setPadding(0, dp(6), 0, dp(12))
+            setPadding(0, dp(6), 0, dp(8))
         }
         root.addView(rangeText)
+
+        chooseTypesButton = Button(this).apply {
+            text = "选择搜索文件类型"
+            setOnClickListener { showFileTypeDialog() }
+        }
+        root.addView(chooseTypesButton, matchWrap())
+
+        typeText = TextView(this).apply {
+            textSize = 14f
+            setTextColor(Color.rgb(85, 85, 85))
+            setPadding(0, dp(6), 0, dp(12))
+        }
+        root.addView(typeText)
 
         keywordInput = EditText(this).apply {
             hint = "输入需要搜索的文字"
@@ -161,7 +202,6 @@ class MainActivity : AppCompatActivity() {
 
         caseSensitiveCheck = CheckBox(this).apply {
             text = "区分大小写"
-            isChecked = false
         }
         root.addView(caseSensitiveCheck)
 
@@ -211,11 +251,14 @@ class MainActivity : AppCompatActivity() {
             adapter = resultAdapter
             dividerHeight = 1
         }
-        root.addView(listView, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            0,
-            1f
-        ))
+        root.addView(
+            listView,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+        )
 
         return root
     }
@@ -241,10 +284,11 @@ class MainActivity : AppCompatActivity() {
             chooseRangeButton.isEnabled = choices.isNotEmpty()
 
             val sameRoot = prefs.getString(KEY_SELECTION_ROOT, null) == uri.toString()
+            val hasSavedSelection = prefs.contains(KEY_SELECTED_FOLDERS)
             val saved = prefs.getStringSet(KEY_SELECTED_FOLDERS, emptySet()).orEmpty()
             selectedFolderUris = when {
                 forceSelectAll -> choices.mapTo(mutableSetOf()) { it.uri }
-                sameRoot -> choices.filter { it.uri in saved }.mapTo(mutableSetOf()) { it.uri }
+                sameRoot && hasSavedSelection -> choices.filter { it.uri in saved }.mapTo(mutableSetOf()) { it.uri }
                 else -> choices.mapTo(mutableSetOf()) { it.uri }
             }
             saveFolderSelection()
@@ -256,33 +300,108 @@ class MainActivity : AppCompatActivity() {
 
     private fun showFolderSelectionDialog() {
         if (folderChoices.isEmpty()) {
-            Toast.makeText(this, "该总文件夹下没有一级子文件夹，将只搜索根目录 TXT", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "该总文件夹下没有一级子文件夹，将只搜索根目录文件", Toast.LENGTH_LONG).show()
             return
         }
-        val checked = BooleanArray(folderChoices.size) { index ->
-            folderChoices[index].uri in selectedFolderUris
-        }
-        AlertDialog.Builder(this)
-            .setTitle("选择参与搜索的子文件夹")
-            .setMessage("默认全选。取消勾选后，该子文件夹及其所有下级文件夹都不会被搜索。根目录中的 TXT 始终参与搜索。")
-            .setMultiChoiceItems(
-                folderChoices.map { it.name }.toTypedArray(),
-                checked
-            ) { _, which, isChecked -> checked[which] = isChecked }
-            .setNeutralButton("全选") { _, _ ->
-                selectedFolderUris = folderChoices.mapTo(mutableSetOf()) { it.uri }
-                saveFolderSelection()
-                updateRangeSummary()
+        val listView = ListView(this).apply {
+            choiceMode = ListView.CHOICE_MODE_MULTIPLE
+            adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_list_item_multiple_choice,
+                folderChoices.map { it.name }
+            )
+            folderChoices.forEachIndexed { index, choice ->
+                setItemChecked(index, choice.uri in selectedFolderUris)
             }
+        }
+        val view = selectionView(
+            "默认全选。点选每个子文件夹前面的勾选框；取消后，该文件夹及其所有下级内容都不会搜索。根目录文件始终参与搜索。",
+            listView
+        )
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("选择参与搜索的子文件夹")
+            .setView(view)
+            .setNeutralButton("全选", null)
             .setNegativeButton("取消", null)
             .setPositiveButton("确定") { _, _ ->
                 selectedFolderUris = folderChoices.indices
-                    .filter { checked[it] }
+                    .filter { listView.isItemChecked(it) }
                     .mapTo(mutableSetOf()) { folderChoices[it].uri }
                 saveFolderSelection()
                 updateRangeSummary()
             }
-            .show()
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                folderChoices.indices.forEach { listView.setItemChecked(it, true) }
+            }
+        }
+        dialog.show()
+    }
+
+    private fun showFileTypeDialog() {
+        val values = SearchFileType.entries
+        val listView = ListView(this).apply {
+            choiceMode = ListView.CHOICE_MODE_MULTIPLE
+            adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_list_item_multiple_choice,
+                values.map { type ->
+                    when (type) {
+                        SearchFileType.TXT -> "TXT（.txt、.md、.log）"
+                        SearchFileType.PDF -> "PDF（.pdf）"
+                        SearchFileType.DOCUMENT -> "文档（.doc、.docx、.odt、.rtf）"
+                        SearchFileType.SPREADSHEET -> "表格（.xls、.xlsx、.ods、.csv、.tsv）"
+                    }
+                }
+            )
+            values.forEachIndexed { index, type -> setItemChecked(index, type in selectedFileTypes) }
+        }
+        val view = selectionView(
+            "默认搜索全部类型。可以取消不需要的类别；文档和表格按大类选择，不需要逐个扩展名设置。",
+            listView
+        )
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("选择搜索文件类型")
+            .setView(view)
+            .setNeutralButton("全选", null)
+            .setNegativeButton("取消", null)
+            .setPositiveButton("确定") { _, _ ->
+                selectedFileTypes = values.indices
+                    .filter { listView.isItemChecked(it) }
+                    .mapTo(linkedSetOf()) { values[it] }
+                prefs.edit()
+                    .putStringSet(KEY_SELECTED_TYPES, selectedFileTypes.mapTo(linkedSetOf()) { it.name })
+                    .apply()
+                updateTypeSummary()
+            }
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                values.indices.forEach { listView.setItemChecked(it, true) }
+            }
+        }
+        dialog.show()
+    }
+
+    private fun selectionView(description: String, listView: ListView): View {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(8), dp(4), dp(8), 0)
+            addView(TextView(this@MainActivity).apply {
+                text = description
+                textSize = 14f
+                setTextColor(Color.rgb(80, 80, 80))
+                setPadding(dp(8), dp(4), dp(8), dp(8))
+            })
+            addView(
+                listView,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    (resources.displayMetrics.heightPixels * 0.46f).toInt()
+                )
+            )
+        }
     }
 
     private fun saveFolderSelection() {
@@ -294,12 +413,16 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateRangeSummary() {
         rangeText.text = if (folderChoices.isEmpty()) {
-            "搜索范围：根目录中的 TXT"
+            "搜索范围：总文件夹根目录"
         } else {
             val excluded = folderChoices.size - selectedFolderUris.size
-            "搜索范围：根目录 TXT + 已选 ${selectedFolderUris.size}/${folderChoices.size} 个一级子文件夹" +
+            "搜索范围：根目录 + 已选 ${selectedFolderUris.size}/${folderChoices.size} 个一级子文件夹" +
                 if (excluded > 0) "（已排除 $excluded 个）" else ""
         }
+    }
+
+    private fun updateTypeSummary() {
+        typeText.text = "文件类型：${SearchFileType.labels(selectedFileTypes)}"
     }
 
     private fun startSearch() {
@@ -313,6 +436,16 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "请输入需要搜索的文字", Toast.LENGTH_SHORT).show()
             return
         }
+        if (selectedFileTypes.isEmpty()) {
+            Toast.makeText(this, "请至少选择一种文件类型", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        prefs.edit()
+            .putString(KEY_KEYWORD, keyword)
+            .putBoolean(KEY_CASE_SENSITIVE, caseSensitiveCheck.isChecked)
+            .putStringSet(KEY_SELECTED_TYPES, selectedFileTypes.mapTo(linkedSetOf()) { it.name })
+            .apply()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -327,6 +460,10 @@ class MainActivity : AppCompatActivity() {
             .putStringArrayListExtra(
                 SearchService.EXTRA_SELECTED_CHILDREN,
                 ArrayList(selectedFolderUris)
+            )
+            .putStringArrayListExtra(
+                SearchService.EXTRA_SELECTED_FILE_TYPES,
+                ArrayList(selectedFileTypes.map { it.name })
             )
             .putExtra(SearchService.EXTRA_CASE_SENSITIVE, caseSensitiveCheck.isChecked)
         ContextCompat.startForegroundService(this, intent)
@@ -345,6 +482,7 @@ class MainActivity : AppCompatActivity() {
         stopButton.isEnabled = snapshot.running
         if (keywordInput.text.isEmpty() && snapshot.keyword.isNotEmpty()) {
             keywordInput.setText(snapshot.keyword)
+            keywordInput.setSelection(keywordInput.text.length)
         }
     }
 
@@ -377,5 +515,8 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_ROOT_URI = "rootUri"
         private const val KEY_SELECTION_ROOT = "selectionRoot"
         private const val KEY_SELECTED_FOLDERS = "selectedFolders"
+        private const val KEY_SELECTED_TYPES = "selectedFileTypes"
+        private const val KEY_KEYWORD = "keyword"
+        private const val KEY_CASE_SENSITIVE = "caseSensitive"
     }
 }
