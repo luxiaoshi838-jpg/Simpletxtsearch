@@ -20,10 +20,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import org.mozilla.universalchardet.UniversalDetector
-import java.io.InputStreamReader
-import java.nio.charset.Charset
-import java.nio.charset.StandardCharsets
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -64,9 +60,12 @@ class SearchService : Service() {
         val keyword = intent.getStringExtra(EXTRA_KEYWORD).orEmpty()
         val selectedChildren = intent.getStringArrayListExtra(EXTRA_SELECTED_CHILDREN)
             ?.toSet().orEmpty()
+        val selectedTypes = SearchFileType.parseNames(
+            intent.getStringArrayListExtra(EXTRA_SELECTED_FILE_TYPES)
+        )
         val caseSensitive = intent.getBooleanExtra(EXTRA_CASE_SENSITIVE, false)
 
-        if (rootUri.isNullOrBlank() || keyword.isEmpty()) {
+        if (rootUri.isNullOrBlank() || keyword.isEmpty() || selectedTypes.isEmpty()) {
             SearchStore.finish(this, "搜索参数不完整", 0, 0, 0)
             broadcastProgress()
             stopSelf()
@@ -83,15 +82,19 @@ class SearchService : Service() {
                     ?: error("无法读取所选文件夹")
                 val children = root.listFiles().sortedBy { it.name?.lowercase(Locale.ROOT).orEmpty() }
 
-                children.filter { it.isFile && it.isTxt() }.forEach { file ->
-                    scanFile(file, file.name.orEmpty(), keyword, caseSensitive)
-                }
+                children.filter { it.isFile }
+                    .forEach { file ->
+                        SearchFileType.fromFileName(file.name)
+                            ?.takeIf { it in selectedTypes }
+                            ?.let { type -> scanFile(file, file.name.orEmpty(), type, keyword, caseSensitive) }
+                    }
 
                 children.filter { it.isDirectory && it.uri.toString() in selectedChildren }
                     .forEach { directory ->
                         scanDirectory(
                             directory = directory,
                             relativePath = directory.name.orEmpty(),
+                            selectedTypes = selectedTypes,
                             keyword = keyword,
                             caseSensitive = caseSensitive
                         )
@@ -100,7 +103,7 @@ class SearchService : Service() {
                 val status = buildString {
                     append("搜索完成：已扫描 ")
                     append(scanned)
-                    append(" 个 TXT，找到 ")
+                    append(" 个文件，找到 ")
                     append(matched)
                     append(" 个文件")
                     if (failed > 0) append("，跳过 $failed 个无法读取的文件")
@@ -129,6 +132,7 @@ class SearchService : Service() {
     private suspend fun scanDirectory(
         directory: DocumentFile,
         relativePath: String,
+        selectedTypes: Set<SearchFileType>,
         keyword: String,
         caseSensitive: Boolean
     ) {
@@ -143,8 +147,16 @@ class SearchService : Service() {
                     "$relativePath/${child.name.orEmpty()}"
                 }
                 when {
-                    child.isDirectory -> scanDirectory(child, childPath, keyword, caseSensitive)
-                    child.isFile && child.isTxt() -> scanFile(child, childPath, keyword, caseSensitive)
+                    child.isDirectory -> scanDirectory(
+                        child,
+                        childPath,
+                        selectedTypes,
+                        keyword,
+                        caseSensitive
+                    )
+                    child.isFile -> SearchFileType.fromFileName(child.name)
+                        ?.takeIf { it in selectedTypes }
+                        ?.let { type -> scanFile(child, childPath, type, keyword, caseSensitive) }
                 }
             }
     }
@@ -152,13 +164,22 @@ class SearchService : Service() {
     private fun scanFile(
         file: DocumentFile,
         relativePath: String,
+        type: SearchFileType,
         keyword: String,
         caseSensitive: Boolean
     ) {
         if (stopRequested.get()) throw CancellationException()
         val hit = runCatching {
-            fileContains(file, keyword, caseSensitive)
-        }.onFailure {
+            ContentSearchEngine.contains(
+                context = this,
+                uri = file.uri,
+                fileName = file.name.orEmpty(),
+                keyword = keyword,
+                caseSensitive = caseSensitive,
+                isCancelled = { stopRequested.get() || !scope.isActive }
+            )
+        }.onFailure { error ->
+            if (error is CancellationException) throw error
             failed += 1
         }.getOrDefault(false)
 
@@ -168,69 +189,21 @@ class SearchService : Service() {
             SearchStore.appendResult(
                 this,
                 SearchStore.Result(
-                    name = file.name ?: "未命名.txt",
+                    name = file.name ?: "未命名文件",
                     uri = file.uri.toString(),
                     relativePath = relativePath
                 )
             )
         }
 
-        val status = "正在搜索：已扫描 $scanned 个，找到 $matched 个"
+        val status = "正在搜索：已扫描 $scanned 个，找到 $matched 个 · ${type.label}"
         SearchStore.updateProgress(this, status, scanned, matched, failed)
         val now = System.currentTimeMillis()
-        if (hit || scanned % 5 == 0 || now - lastNotificationAt >= 750L) {
+        if (hit || scanned % 3 == 0 || now - lastNotificationAt >= 750L) {
             lastNotificationAt = now
             updateNotification(status)
             broadcastProgress()
         }
-    }
-
-    private fun fileContains(
-        file: DocumentFile,
-        keyword: String,
-        caseSensitive: Boolean
-    ): Boolean {
-        val charset = detectCharset(file)
-        return contentResolver.openInputStream(file.uri)?.use { input ->
-            InputStreamReader(input, charset).use { reader ->
-                TextMatcher.contains(reader, keyword, caseSensitive) {
-                    stopRequested.get() || !scope.isActive
-                }
-            }
-        } ?: false
-    }
-
-    private fun detectCharset(file: DocumentFile): Charset {
-        val sample = contentResolver.openInputStream(file.uri)?.use { input ->
-            val buffer = ByteArray(64 * 1024)
-            val size = input.read(buffer)
-            if (size <= 0) ByteArray(0) else buffer.copyOf(size)
-        } ?: ByteArray(0)
-
-        if (sample.size >= 3 && sample[0] == 0xEF.toByte() && sample[1] == 0xBB.toByte() && sample[2] == 0xBF.toByte()) {
-            return StandardCharsets.UTF_8
-        }
-        if (sample.size >= 2 && sample[0] == 0xFF.toByte() && sample[1] == 0xFE.toByte()) {
-            return StandardCharsets.UTF_16LE
-        }
-        if (sample.size >= 2 && sample[0] == 0xFE.toByte() && sample[1] == 0xFF.toByte()) {
-            return StandardCharsets.UTF_16BE
-        }
-
-        val detector = UniversalDetector(null)
-        if (sample.isNotEmpty()) detector.handleData(sample, 0, sample.size)
-        detector.dataEnd()
-        val detected = detector.detectedCharset?.uppercase(Locale.ROOT)
-        detector.reset()
-
-        val normalized = when (detected) {
-            "GB2312", "GBK", "GB18030" -> "GB18030"
-            "UTF8" -> "UTF-8"
-            else -> detected
-        }
-        return runCatching {
-            if (normalized.isNullOrBlank()) StandardCharsets.UTF_8 else Charset.forName(normalized)
-        }.getOrDefault(StandardCharsets.UTF_8)
     }
 
     private fun stopSearch(status: String) {
@@ -243,14 +216,11 @@ class SearchService : Service() {
         stopSelf()
     }
 
-    private fun DocumentFile.isTxt(): Boolean =
-        name?.endsWith(".txt", ignoreCase = true) == true
-
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "TXT 搜索任务",
+                "文件内容搜索任务",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
                 description = "显示简搜后台扫描进度"
@@ -322,7 +292,7 @@ class SearchService : Service() {
         val manager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = manager.newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK,
-            "$packageName:txt-search"
+            "$packageName:file-search"
         ).apply {
             setReferenceCounted(false)
             acquire(6 * 60 * 60 * 1000L)
@@ -354,9 +324,10 @@ class SearchService : Service() {
         const val EXTRA_ROOT_URI = "rootUri"
         const val EXTRA_KEYWORD = "keyword"
         const val EXTRA_SELECTED_CHILDREN = "selectedChildren"
+        const val EXTRA_SELECTED_FILE_TYPES = "selectedFileTypes"
         const val EXTRA_CASE_SENSITIVE = "caseSensitive"
 
-        private const val CHANNEL_ID = "txt_search"
+        private const val CHANNEL_ID = "file_content_search"
         private const val NOTIFICATION_ID = 2407
     }
 }

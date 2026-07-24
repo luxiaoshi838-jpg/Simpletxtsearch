@@ -7,20 +7,14 @@ val releaseStorePath = System.getenv("SIMPLETXTSEARCH_KEYSTORE_PATH")
 val releaseStorePassword = System.getenv("SIMPLETXTSEARCH_KEYSTORE_PASSWORD")
 val releaseKeyAlias = System.getenv("SIMPLETXTSEARCH_KEY_ALIAS")
 val releaseKeyPassword = System.getenv("SIMPLETXTSEARCH_KEY_PASSWORD")
-val releaseSigningConfigured = listOf(
-    releaseStorePath,
-    releaseStorePassword,
-    releaseKeyAlias,
-    releaseKeyPassword
-).all { !it.isNullOrBlank() }
+val releaseSigningConfigured = listOf(releaseStorePath, releaseStorePassword, releaseKeyAlias, releaseKeyPassword).all { !it.isNullOrBlank() }
 
 android {
     namespace = "com.luxiaoshi.simpletxtsearch"
     compileSdk = 35
 
-    val generatedVersionCode = (System.getenv("SIMPLETXTSEARCH_VERSION_CODE") ?: "2026072401")
-        .toIntOrNull() ?: 2026072401
-    val generatedVersionName = System.getenv("SIMPLETXTSEARCH_VERSION_NAME") ?: "1.0.0"
+    val generatedVersionCode = (System.getenv("SIMPLETXTSEARCH_VERSION_CODE") ?: "2026072402").toIntOrNull() ?: 2026072402
+    val generatedVersionName = System.getenv("SIMPLETXTSEARCH_VERSION_NAME") ?: "1.1.0"
 
     defaultConfig {
         applicationId = "com.luxiaoshi.simpletxtsearch"
@@ -29,6 +23,7 @@ android {
         versionCode = generatedVersionCode
         versionName = generatedVersionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        multiDexEnabled = true
     }
 
     signingConfigs {
@@ -46,14 +41,9 @@ android {
 
     buildTypes {
         release {
-            if (releaseSigningConfigured) {
-                signingConfig = signingConfigs.getByName("stableRelease")
-            }
+            if (releaseSigningConfigured) signingConfig = signingConfigs.getByName("stableRelease")
             isMinifyEnabled = false
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro"
-            )
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
 
@@ -61,13 +51,23 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+    kotlinOptions { jvmTarget = "17" }
+    testOptions { unitTests.isIncludeAndroidResources = true }
 
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-
-    testOptions {
-        unitTests.isIncludeAndroidResources = true
+    packaging {
+        resources {
+            excludes += setOf(
+                "META-INF/DEPENDENCIES",
+                "META-INF/LICENSE",
+                "META-INF/LICENSE.txt",
+                "META-INF/NOTICE",
+                "META-INF/NOTICE.txt",
+                "META-INF/INDEX.LIST",
+                "META-INF/*.SF",
+                "META-INF/*.DSA",
+                "META-INF/*.RSA"
+            )
+        }
     }
 }
 
@@ -78,6 +78,10 @@ dependencies {
     implementation("androidx.documentfile:documentfile:1.0.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     implementation("com.github.albfernandez:juniversalchardet:2.5.0")
-
+    implementation("com.tom-roush:pdfbox-android:2.0.27.0")
+    implementation("com.github.SUPERCILEX.poi-android:poi:3.17")
+    implementation("org.apache.poi:poi-scratchpad:3.17") {
+        exclude(group = "org.apache.poi", module = "poi")
+    }
     testImplementation("junit:junit:4.13.2")
 }
