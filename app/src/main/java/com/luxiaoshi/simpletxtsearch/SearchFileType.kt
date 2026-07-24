@@ -23,10 +23,10 @@ enum class SearchFileType(
         }
 
         fun parseNames(names: Collection<String>?): Set<SearchFileType> {
-            if (names == null) return defaultSelection
+            if (names.isNullOrEmpty()) return defaultSelection
             return names.mapNotNullTo(linkedSetOf()) { saved ->
                 entries.firstOrNull { it.name == saved }
-            }
+            }.ifEmpty { defaultSelection }
         }
 
         fun labels(types: Set<SearchFileType>): String {
