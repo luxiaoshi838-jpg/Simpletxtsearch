@@ -48,7 +48,7 @@ jobs:
             --name SimpleSearchPC `
             --input desktop/target `
             --main-jar simpletxtsearch-pc-1.2.0-all.jar `
-            --main-class com.luxiaoshi.simpletxtsearch.pc.SimpleTxtSearchPc `
+            --main-class com.luxiaoshi.simpletxtsearch.pc.SimpleTxtSearchPcLauncher `
             --dest desktop/dist `
             --app-version 1.2.0 `
             --vendor luxiaoshi838-jpg `
@@ -68,8 +68,9 @@ jobs:
           2. 不需要另装 Java。
           3. 关键词之间用空格分隔，最多 10 个。
           4. 同一文件必须同时包含全部关键词才会列入结果。
-          5. 双击搜索结果或点击“打开所选文件”即可打开原文件。
-          6. 不要单独复制 EXE；请保留同目录的 app 和 runtime 文件夹。
+          5. 搜索结果分为“名称”和“文件位置”两列；第二列只显示所在目录。
+          6. 双击搜索结果或点击“打开所选文件”即可打开原文件。
+          7. 不要单独复制 EXE；请保留同目录的 app 和 runtime 文件夹。
           '@ | Set-Content -Path (Join-Path $appDir.FullName '使用说明.txt') -Encoding UTF8
 
           Compress-Archive -Path $appDir.FullName -DestinationPath '简搜_PC_随用版_v1.2.0.zip' -CompressionLevel Optimal
