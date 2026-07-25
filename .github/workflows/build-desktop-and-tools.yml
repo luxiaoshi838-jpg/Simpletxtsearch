@@ -45,13 +45,16 @@ jobs:
           New-Item -ItemType Directory -Force -Path desktop/dist | Out-Null
           jpackage `
             --type app-image `
-            --name '简搜-PC' `
+            --name SimpleSearchPC `
             --input desktop/target `
             --main-jar simpletxtsearch-pc-1.2.0-all.jar `
             --main-class com.luxiaoshi.simpletxtsearch.pc.SimpleTxtSearchPc `
             --dest desktop/dist `
             --app-version 1.2.0 `
-            --vendor luxiaoshi838-jpg
+            --vendor luxiaoshi838-jpg `
+            --description '简搜 PC 随用版' `
+            --verbose 2>&1 | Tee-Object -FilePath jpackage.log
+          if ($LASTEXITCODE -ne 0) { throw "jpackage failed with exit code $LASTEXITCODE" }
 
           $appDir = Get-ChildItem desktop/dist -Directory | Select-Object -First 1
           if (-not $appDir) { throw 'jpackage app image missing' }
@@ -61,7 +64,7 @@ jobs:
           @'
           简搜 PC 随用版 1.2.0
 
-          1. 请先完整解压，再双击目录中的“简搜-PC.exe”。
+          1. 请先完整解压，再双击目录中的“SimpleSearchPC.exe”。
           2. 不需要另装 Java。
           3. 关键词之间用空格分隔，最多 10 个。
           4. 同一文件必须同时包含全部关键词才会列入结果。
@@ -82,6 +85,15 @@ jobs:
             简搜_PC_随用版_v1.2.0_SHA256.txt
           if-no-files-found: error
           retention-days: 14
+
+      - name: Upload jpackage diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Simpletxtsearch-PC-jpackage-log
+          path: jpackage.log
+          if-no-files-found: warn
+          retention-days: 7
 
   signing-tool:
     runs-on: ubuntu-latest
