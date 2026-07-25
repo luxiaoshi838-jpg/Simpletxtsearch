@@ -13,7 +13,6 @@ import org.apache.poi.ss.usermodel.DataFormatter
 import org.mozilla.universalchardet.UniversalDetector
 import org.xmlpull.v1.XmlPullParser
 import java.io.BufferedInputStream
-import java.io.ByteArrayInputStream
 import java.io.InputStream
 import java.io.InputStreamReader
 import java.nio.charset.Charset
@@ -29,29 +28,39 @@ object ContentSearchEngine {
         keyword: String,
         caseSensitive: Boolean,
         isCancelled: () -> Boolean
+    ): Boolean = contains(context, uri, fileName, listOf(keyword), caseSensitive, isCancelled)
+
+    fun contains(
+        context: Context,
+        uri: Uri,
+        fileName: String,
+        keywords: List<String>,
+        caseSensitive: Boolean,
+        isCancelled: () -> Boolean
     ): Boolean {
         checkCancelled(isCancelled)
+        if (keywords.isEmpty()) return false
         val extension = fileName.substringAfterLast('.', "").lowercase(Locale.ROOT)
         return when (extension) {
             "txt", "md", "log", "csv", "tsv" -> containsPlainText(
                 context,
                 uri,
-                keyword,
+                keywords,
                 caseSensitive,
                 isCancelled
             )
-            "pdf" -> containsPdf(context, uri, keyword, caseSensitive, isCancelled)
-            "doc" -> containsLegacyWord(context, uri, keyword, caseSensitive, isCancelled)
-            "xls" -> containsLegacySpreadsheet(context, uri, keyword, caseSensitive, isCancelled)
+            "pdf" -> containsPdf(context, uri, keywords, caseSensitive, isCancelled)
+            "doc" -> containsLegacyWord(context, uri, keywords, caseSensitive, isCancelled)
+            "xls" -> containsLegacySpreadsheet(context, uri, keywords, caseSensitive, isCancelled)
             "docx", "xlsx", "odt", "ods" -> containsZipXml(
                 context,
                 uri,
                 extension,
-                keyword,
+                keywords,
                 caseSensitive,
                 isCancelled
             )
-            "rtf" -> containsRtf(context, uri, keyword, caseSensitive, isCancelled)
+            "rtf" -> containsRtf(context, uri, keywords, caseSensitive, isCancelled)
             else -> false
         }
     }
@@ -59,14 +68,14 @@ object ContentSearchEngine {
     private fun containsPlainText(
         context: Context,
         uri: Uri,
-        keyword: String,
+        keywords: List<String>,
         caseSensitive: Boolean,
         isCancelled: () -> Boolean
     ): Boolean {
         val charset = detectCharset(context, uri)
         return context.contentResolver.openInputStream(uri)?.use { input ->
             InputStreamReader(input, charset).use { reader ->
-                TextMatcher.contains(reader, keyword, caseSensitive, isCancelled)
+                TextMatcher.contains(reader, keywords, caseSensitive, isCancelled)
             }
         } ?: false
     }
@@ -74,10 +83,11 @@ object ContentSearchEngine {
     private fun containsPdf(
         context: Context,
         uri: Uri,
-        keyword: String,
+        keywords: List<String>,
         caseSensitive: Boolean,
         isCancelled: () -> Boolean
     ): Boolean {
+        val matcher = MultiKeywordMatcher(keywords, caseSensitive)
         return context.contentResolver.openInputStream(uri)?.use { input ->
             PDDocument.load(input).use { document ->
                 val stripper = PDFTextStripper()
@@ -85,7 +95,8 @@ object ContentSearchEngine {
                     checkCancelled(isCancelled)
                     stripper.startPage = page
                     stripper.endPage = page
-                    if (matches(stripper.getText(document), keyword, caseSensitive)) return true
+                    if (matcher.feed(stripper.getText(document))) return true
+                    if (matcher.separator()) return true
                 }
                 false
             }
@@ -95,7 +106,7 @@ object ContentSearchEngine {
     private fun containsLegacyWord(
         context: Context,
         uri: Uri,
-        keyword: String,
+        keywords: List<String>,
         caseSensitive: Boolean,
         isCancelled: () -> Boolean
     ): Boolean {
@@ -103,7 +114,7 @@ object ContentSearchEngine {
             checkCancelled(isCancelled)
             HWPFDocument(input).use { document ->
                 WordExtractor(document).use { extractor ->
-                    matches(extractor.text, keyword, caseSensitive)
+                    matchesAll(extractor.text, keywords, caseSensitive)
                 }
             }
         } ?: false
@@ -112,21 +123,24 @@ object ContentSearchEngine {
     private fun containsLegacySpreadsheet(
         context: Context,
         uri: Uri,
-        keyword: String,
+        keywords: List<String>,
         caseSensitive: Boolean,
         isCancelled: () -> Boolean
     ): Boolean {
+        val matcher = MultiKeywordMatcher(keywords, caseSensitive)
         return context.contentResolver.openInputStream(uri)?.use { input ->
             HSSFWorkbook(input).use { workbook ->
                 val formatter = DataFormatter()
                 for (sheetIndex in 0 until workbook.numberOfSheets) {
                     checkCancelled(isCancelled)
                     val sheet = workbook.getSheetAt(sheetIndex)
-                    if (matches(sheet.sheetName, keyword, caseSensitive)) return true
+                    if (matcher.feed(sheet.sheetName) || matcher.separator()) return true
                     for (row in sheet) {
                         checkCancelled(isCancelled)
                         for (cell in row) {
-                            if (matches(formatter.formatCellValue(cell), keyword, caseSensitive)) return true
+                            if (matcher.feed(formatter.formatCellValue(cell)) || matcher.separator()) {
+                                return true
+                            }
                         }
                     }
                 }
@@ -139,10 +153,11 @@ object ContentSearchEngine {
         context: Context,
         uri: Uri,
         extension: String,
-        keyword: String,
+        keywords: List<String>,
         caseSensitive: Boolean,
         isCancelled: () -> Boolean
     ): Boolean {
+        val matcher = MultiKeywordMatcher(keywords, caseSensitive)
         return context.contentResolver.openInputStream(uri)?.use { input ->
             ZipInputStream(BufferedInputStream(input)).use { zip ->
                 var entry = zip.nextEntry
@@ -150,7 +165,8 @@ object ContentSearchEngine {
                     checkCancelled(isCancelled)
                     val name = entry.name.lowercase(Locale.ROOT)
                     if (!entry.isDirectory && isSearchableXmlEntry(extension, name)) {
-                        if (containsXmlText(zip, keyword, caseSensitive, isCancelled)) return true
+                        if (containsXmlText(zip, matcher, isCancelled)) return true
+                        if (matcher.separator()) return true
                     }
                     zip.closeEntry()
                     entry = zip.nextEntry
@@ -162,11 +178,9 @@ object ContentSearchEngine {
 
     private fun containsXmlText(
         input: InputStream,
-        keyword: String,
-        caseSensitive: Boolean,
+        matcher: MultiKeywordMatcher,
         isCancelled: () -> Boolean
     ): Boolean {
-        val matcher = ChunkMatcher(keyword, caseSensitive)
         val parser = Xml.newPullParser()
         parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, true)
         parser.setInput(input, null)
@@ -209,7 +223,7 @@ object ContentSearchEngine {
     private fun containsRtf(
         context: Context,
         uri: Uri,
-        keyword: String,
+        keywords: List<String>,
         caseSensitive: Boolean,
         isCancelled: () -> Boolean
     ): Boolean {
@@ -217,7 +231,7 @@ object ContentSearchEngine {
             InputStreamReader(input, Charset.forName("windows-1252")).readText()
         } ?: return false
         checkCancelled(isCancelled)
-        return matches(extractRtfText(raw, isCancelled), keyword, caseSensitive)
+        return matchesAll(extractRtfText(raw, isCancelled), keywords, caseSensitive)
     }
 
     internal fun extractRtfText(raw: String, isCancelled: () -> Boolean = { false }): String {
@@ -332,11 +346,9 @@ object ContentSearchEngine {
         }.getOrDefault(StandardCharsets.UTF_8)
     }
 
-    private fun matches(text: String, keyword: String, caseSensitive: Boolean): Boolean {
-        return if (caseSensitive) {
-            text.contains(keyword)
-        } else {
-            text.contains(keyword, ignoreCase = true)
+    private fun matchesAll(text: String, keywords: List<String>, caseSensitive: Boolean): Boolean {
+        return keywords.isNotEmpty() && keywords.all { keyword ->
+            if (caseSensitive) text.contains(keyword) else text.contains(keyword, ignoreCase = true)
         }
     }
 
