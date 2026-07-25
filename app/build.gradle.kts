@@ -13,8 +13,8 @@ android {
     namespace = "com.luxiaoshi.simpletxtsearch"
     compileSdk = 35
 
-    val generatedVersionCode = (System.getenv("SIMPLETXTSEARCH_VERSION_CODE") ?: "2026072402").toIntOrNull() ?: 2026072402
-    val generatedVersionName = System.getenv("SIMPLETXTSEARCH_VERSION_NAME") ?: "1.1.0"
+    val generatedVersionCode = (System.getenv("SIMPLETXTSEARCH_VERSION_CODE") ?: "2026072501").toIntOrNull() ?: 2026072501
+    val generatedVersionName = System.getenv("SIMPLETXTSEARCH_VERSION_NAME") ?: "1.2.0"
 
     defaultConfig {
         applicationId = "com.luxiaoshi.simpletxtsearch"
