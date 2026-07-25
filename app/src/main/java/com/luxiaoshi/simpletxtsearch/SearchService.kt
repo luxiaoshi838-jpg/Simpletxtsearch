@@ -57,7 +57,8 @@ class SearchService : Service() {
         failed = 0
 
         val rootUri = intent.getStringExtra(EXTRA_ROOT_URI)
-        val keyword = intent.getStringExtra(EXTRA_KEYWORD).orEmpty()
+        val rawKeyword = intent.getStringExtra(EXTRA_KEYWORD).orEmpty()
+        val keywordTokens = KeywordQuery.split(rawKeyword)
         val selectedChildren = intent.getStringArrayListExtra(EXTRA_SELECTED_CHILDREN)
             ?.toSet().orEmpty()
         val selectedTypes = SearchFileType.parseNames(
@@ -65,14 +66,22 @@ class SearchService : Service() {
         )
         val caseSensitive = intent.getBooleanExtra(EXTRA_CASE_SENSITIVE, false)
 
-        if (rootUri.isNullOrBlank() || keyword.isEmpty() || selectedTypes.isEmpty()) {
-            SearchStore.finish(this, "搜索参数不完整", 0, 0, 0)
+        val parameterError = when {
+            rootUri.isNullOrBlank() -> "请先选择总文件夹"
+            keywordTokens.isEmpty() -> "请输入至少 1 个关键词"
+            keywordTokens.size > KeywordQuery.MAX_KEYWORDS -> "关键词最多 ${KeywordQuery.MAX_KEYWORDS} 个，请用空格分隔"
+            selectedTypes.isEmpty() -> "请至少选择一种文件类型"
+            else -> null
+        }
+        if (parameterError != null) {
+            SearchStore.finish(this, parameterError, 0, 0, 0)
             broadcastProgress()
             stopSelf()
             return
         }
+        val keywords = keywordTokens.distinct()
 
-        SearchStore.reset(this, keyword)
+        SearchStore.reset(this, rawKeyword.trim())
         startForeground(NOTIFICATION_ID, buildNotification("正在准备搜索……"))
         acquireWakeLock()
 
@@ -86,7 +95,7 @@ class SearchService : Service() {
                     .forEach { file ->
                         SearchFileType.fromFileName(file.name)
                             ?.takeIf { it in selectedTypes }
-                            ?.let { type -> scanFile(file, file.name.orEmpty(), type, keyword, caseSensitive) }
+                            ?.let { type -> scanFile(file, file.name.orEmpty(), type, keywords, caseSensitive) }
                     }
 
                 children.filter { it.isDirectory && it.uri.toString() in selectedChildren }
@@ -95,7 +104,7 @@ class SearchService : Service() {
                             directory = directory,
                             relativePath = directory.name.orEmpty(),
                             selectedTypes = selectedTypes,
-                            keyword = keyword,
+                            keywords = keywords,
                             caseSensitive = caseSensitive
                         )
                     }
@@ -133,7 +142,7 @@ class SearchService : Service() {
         directory: DocumentFile,
         relativePath: String,
         selectedTypes: Set<SearchFileType>,
-        keyword: String,
+        keywords: List<String>,
         caseSensitive: Boolean
     ) {
         if (!scope.isActive || stopRequested.get()) throw CancellationException()
@@ -151,12 +160,12 @@ class SearchService : Service() {
                         child,
                         childPath,
                         selectedTypes,
-                        keyword,
+                        keywords,
                         caseSensitive
                     )
                     child.isFile -> SearchFileType.fromFileName(child.name)
                         ?.takeIf { it in selectedTypes }
-                        ?.let { type -> scanFile(child, childPath, type, keyword, caseSensitive) }
+                        ?.let { type -> scanFile(child, childPath, type, keywords, caseSensitive) }
                 }
             }
     }
@@ -165,7 +174,7 @@ class SearchService : Service() {
         file: DocumentFile,
         relativePath: String,
         type: SearchFileType,
-        keyword: String,
+        keywords: List<String>,
         caseSensitive: Boolean
     ) {
         if (stopRequested.get()) throw CancellationException()
@@ -174,7 +183,7 @@ class SearchService : Service() {
                 context = this,
                 uri = file.uri,
                 fileName = file.name.orEmpty(),
-                keyword = keyword,
+                keywords = keywords,
                 caseSensitive = caseSensitive,
                 isCancelled = { stopRequested.get() || !scope.isActive }
             )
