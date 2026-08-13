@@ -1,0 +1,110 @@
+name: Build Desktop v1.2.10 Count Fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - desktop/tools/optimize_content_v130_count_fix.py
+      - .github/workflows/build-desktop-v130-count-fix.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-portable:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+          cache-dependency-path: desktop/pom.xml
+
+      - name: Apply v1.2.10 count fix
+        shell: pwsh
+        run: |
+          python desktop/tools/optimize_content_v130_count_fix.py
+          $source = Get-Content 'desktop/src/main/java/com/luxiaoshi/simpletxtsearch/pc/SimpleTxtSearchPc.java' -Raw
+          if ($source -notmatch '实际完成正文搜索') { throw 'Actual searched-count wording missing' }
+          if ($source -notmatch 'seenFolderKeys') { throw 'Folder de-duplication missing' }
+          if ($source -notmatch 'toRealPath') { throw 'Canonical path de-duplication missing' }
+          if ($source -notmatch '重复目录跳过') { throw 'Duplicate-folder status missing' }
+          if ($source -notmatch 'ContentSearch.contains') { throw 'Body content search missing' }
+          if ($source -match '默认只搜索文件名') { throw 'Filename-only mode must not exist' }
+          if ($source -notmatch 'event.getClickCount\(\) == 2') { throw 'Double-click result open missing' }
+          if ($source -notmatch 'SEARCH_THREADS') { throw 'Multithreaded search missing' }
+          if ($source -notmatch 'JComboBox<Integer> batchSizeBox') { throw 'Per-batch limit setting missing' }
+          if ($source -notmatch '问题文件夹自动跳过') { throw 'Problem-folder auto skip missing' }
+          $pom = Get-Content 'desktop/pom.xml' -Raw
+          if ($pom -notmatch '<version>1.2.10</version>') { throw 'Maven version is not 1.2.10' }
+          if ($pom -notmatch '<finalName>simpletxtsearch-pc-1.2.10</finalName>') { throw 'JAR finalName is not 1.2.10' }
+
+      - name: Build fat JAR
+        shell: pwsh
+        run: |
+          mvn -B -f desktop/pom.xml clean package
+          if (-not (Test-Path 'desktop/target/simpletxtsearch-pc-1.2.10-all.jar')) { throw 'Desktop v1.2.10 fat JAR missing' }
+
+      - name: Build portable Windows app
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path desktop/dist | Out-Null
+          jpackage `
+            --type app-image `
+            --name SimpleSearchPC `
+            --input desktop/target `
+            --main-jar simpletxtsearch-pc-1.2.10-all.jar `
+            --main-class com.luxiaoshi.simpletxtsearch.pc.SimpleTxtSearchPcLauncher `
+            --dest desktop/dist `
+            --app-version 1.2.10 `
+            --vendor luxiaoshi838-jpg `
+            --description '简搜 PC 随用版 - 正文搜索计数修正版' `
+            --verbose 2>&1 | Tee-Object -FilePath jpackage.log
+          if ($LASTEXITCODE -ne 0) { throw "jpackage failed with exit code $LASTEXITCODE" }
+
+          $appDir = Get-ChildItem desktop/dist -Directory | Select-Object -First 1
+          if (-not $appDir) { throw 'jpackage app image missing' }
+          $exe = Get-ChildItem $appDir.FullName -Filter '*.exe' | Select-Object -First 1
+          if (-not $exe) { throw 'Portable EXE missing' }
+
+          @'
+          简搜 PC 随用版 v1.2.10
+
+          - 始终搜索文件正文，多关键词仍为 AND。
+          - “已搜索文件数”只统计 ContentSearch 正常完成的文件，不再把仅仅遍历到的普通文件算进去。
+          - Windows 同一实际目录若通过重复路径、目录联接等方式再次出现，会按真实路径去重，不重复进入扫描队列。
+          - 问题文件夹继续自动跳过，不中断整次搜索。
+          - 文件夹任务总数不限；每个文件夹仍按单批任务上限分批，多线程搜索正文。
+          - 结果跨批次累计，不设总结果上限；双击结果直接打开原文件。
+          - 每批完成后及时释放正文解析对象和缓冲资源。
+          '@ | Set-Content -Path (Join-Path $appDir.FullName '使用说明.txt') -Encoding UTF8
+
+          $zip = '简搜_PC_随用版_v1.2.10_正文搜索计数修正版.zip'
+          Compress-Archive -Path $appDir.FullName -DestinationPath $zip -CompressionLevel Optimal
+          Get-FileHash $zip -Algorithm SHA256 | Format-List | Out-File '简搜_PC_随用版_v1.2.10_正文搜索计数修正版_SHA256.txt' -Encoding utf8
+
+      - name: Upload portable Windows version
+        uses: actions/upload-artifact@v4
+        with:
+          name: Simpletxtsearch-PC-portable-v1.2.10-count-fix
+          path: |
+            简搜_PC_随用版_v1.2.10_正文搜索计数修正版.zip
+            简搜_PC_随用版_v1.2.10_正文搜索计数修正版_SHA256.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Simpletxtsearch-PC-v1.2.10-jpackage-log
+          path: jpackage.log
+          if-no-files-found: warn
+          retention-days: 7
