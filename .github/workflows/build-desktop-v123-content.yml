@@ -1,0 +1,112 @@
+name: Build Desktop v1.2.3 Content Search Optimized
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - desktop/tools/optimize_content_v123.py
+      - .github/workflows/build-desktop-v123-content.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-portable:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+          cache-dependency-path: desktop/pom.xml
+
+      - name: Apply v1.2.3 content-search optimization
+        shell: pwsh
+        run: |
+          python desktop/tools/optimize_content_v123.py
+          $source = Get-Content 'desktop/src/main/java/com/luxiaoshi/simpletxtsearch/pc/SimpleTxtSearchPc.java' -Raw
+          if ($source -notmatch '搜索文件正文') { throw 'Content-search UI missing' }
+          if ($source -match '默认只搜索文件名') { throw 'Filename-only mode must not be present' }
+          if ($source -notmatch 'Files.newDirectoryStream') { throw 'Streaming traversal missing' }
+          if ($source -notmatch 'EXCLUDED_DIRECTORY_NAMES') { throw 'Directory exclusions missing' }
+          if ($source -notmatch 'currentPathLabel') { throw 'Current path indicator missing' }
+          if ($source -notmatch 'MAX_DISPLAY_RESULTS = 5000') { throw 'Display cap missing' }
+          if ($source -notmatch 'RtfStreamingParser') { throw 'Streaming RTF parser missing' }
+          $pom = Get-Content 'desktop/pom.xml' -Raw
+          if ($pom -notmatch '<version>1.2.3</version>') { throw 'Maven version is not 1.2.3' }
+          if ($pom -notmatch '<finalName>simpletxtsearch-pc-1.2.3</finalName>') { throw 'JAR finalName is not 1.2.3' }
+
+      - name: Build fat JAR
+        shell: pwsh
+        run: |
+          mvn -B -f desktop/pom.xml clean package
+          if (-not (Test-Path 'desktop/target/simpletxtsearch-pc-1.2.3-all.jar')) {
+            throw 'Desktop v1.2.3 fat JAR missing'
+          }
+
+      - name: Build portable Windows app
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path desktop/dist | Out-Null
+          jpackage `
+            --type app-image `
+            --name SimpleSearchPC `
+            --input desktop/target `
+            --main-jar simpletxtsearch-pc-1.2.3-all.jar `
+            --main-class com.luxiaoshi.simpletxtsearch.pc.SimpleTxtSearchPcLauncher `
+            --dest desktop/dist `
+            --app-version 1.2.3 `
+            --vendor luxiaoshi838-jpg `
+            --description '简搜 PC 随用版 - 正文搜索优化' `
+            --verbose 2>&1 | Tee-Object -FilePath jpackage.log
+          if ($LASTEXITCODE -ne 0) { throw "jpackage failed with exit code $LASTEXITCODE" }
+
+          $appDir = Get-ChildItem desktop/dist -Directory | Select-Object -First 1
+          if (-not $appDir) { throw 'jpackage app image missing' }
+          $exe = Get-ChildItem $appDir.FullName -Filter '*.exe' | Select-Object -First 1
+          if (-not $exe) { throw 'Portable EXE missing' }
+
+          @'
+          简搜 PC 随用版 v1.2.3（正文搜索优化版）
+
+          1. 简搜始终按文件正文搜索，不改成文件名搜索。
+          2. 支持原有 TXT/MD/LOG、PDF、Word/ODT/RTF、Excel/ODS/CSV/TSV 内容搜索。
+          3. 多关键词仍为 AND：同一文件正文必须同时包含全部关键词才匹配。
+          4. 搜索范围会完整扫描到结束；5000 条只是界面保留上限，不会让后台提前停止。
+          5. 默认排除 runtime/output/build/dist/target/.git/node_modules/缓存/旧版/过往不用等无意义目录。
+          6. 根目录采用流式遍历，不先把整个文件列表加载进内存。
+          7. 文本类文件继续流式读取；RTF 改为增量解析，避免同时保留完整原文和完整提取文本。
+          8. 搜索结果按批次加入界面，状态栏限频刷新。
+          9. 底部显示当前扫描路径，便于定位异常慢目录或文件。
+          10. Maven/JAR/jpackage 版本统一为 1.2.3。
+          '@ | Set-Content -Path (Join-Path $appDir.FullName '使用说明.txt') -Encoding UTF8
+
+          $zip = '简搜_PC_随用版_v1.2.3_正文搜索优化版.zip'
+          Compress-Archive -Path $appDir.FullName -DestinationPath $zip -CompressionLevel Optimal
+          Get-FileHash $zip -Algorithm SHA256 | Format-List | Out-File '简搜_PC_随用版_v1.2.3_正文搜索优化版_SHA256.txt' -Encoding utf8
+
+      - name: Upload portable Windows version
+        uses: actions/upload-artifact@v4
+        with:
+          name: Simpletxtsearch-PC-portable-v1.2.3-content-search
+          path: |
+            简搜_PC_随用版_v1.2.3_正文搜索优化版.zip
+            简搜_PC_随用版_v1.2.3_正文搜索优化版_SHA256.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Simpletxtsearch-PC-v1.2.3-jpackage-log
+          path: jpackage.log
+          if-no-files-found: warn
+          retention-days: 7
