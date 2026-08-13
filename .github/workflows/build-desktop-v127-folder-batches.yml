@@ -1,0 +1,124 @@
+name: Build Desktop v1.2.7 Folder Batch Content Search
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - desktop/tools/optimize_content_v127_folder_batches.py
+      - .github/workflows/build-desktop-v127-folder-batches.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-portable:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+          cache-dependency-path: desktop/pom.xml
+
+      - name: Apply v1.2.7 folder-batch content-search optimization
+        shell: pwsh
+        run: |
+          python desktop/tools/optimize_content_v127_folder_batches.py
+          $source = Get-Content 'desktop/src/main/java/com/luxiaoshi/simpletxtsearch/pc/SimpleTxtSearchPc.java' -Raw
+          if ($source -notmatch '多线程搜索文件正文') { throw 'Content-search UI missing' }
+          if ($source -match '默认只搜索文件名') { throw 'Filename-only mode must not exist' }
+          if ($source -notmatch 'JComboBox<Integer> batchSizeBox') { throw 'Batch-size setting missing' }
+          if ($source -notmatch 'Deque<Path> folderQueue') { throw 'Folder task queue missing' }
+          if ($source -notmatch 'CountDownLatch') { throw 'Per-batch completion barrier missing' }
+          if ($source -notmatch 'SEARCH_THREADS') { throw 'Parallel content search missing' }
+          if ($source -notmatch 'HEAVY_PARSER_LIMIT') { throw 'Heavy parser concurrency guard missing' }
+          if ($source -notmatch 'Results are cumulative') { throw 'Cumulative results contract missing' }
+          if ($source -match 'MAX_DISPLAY_RESULTS') { throw 'Result-total cap must not exist' }
+          if ($source -notmatch 'event.getClickCount\(\) == 2') { throw 'Double-click open result missing' }
+          if ($source -notmatch 'MemoryUsageSetting.setupMixed') { throw 'Bounded PDF memory mode missing' }
+          if ($source -notmatch 'SequenceInputStream') { throw 'Single-pass text scan missing' }
+          if ($source -notmatch 'PushbackReader') { throw 'Streaming RTF scan missing' }
+          if ($source -notmatch 'reader.close') { throw 'XML reader cleanup missing' }
+          if ($source -notmatch 'System.gc\(\)') { throw 'Heap-pressure release hook missing' }
+          $pom = Get-Content 'desktop/pom.xml' -Raw
+          if ($pom -notmatch '<version>1.2.7</version>') { throw 'Maven version is not 1.2.7' }
+          if ($pom -notmatch '<finalName>simpletxtsearch-pc-1.2.7</finalName>') { throw 'JAR finalName is not 1.2.7' }
+
+      - name: Build fat JAR
+        shell: pwsh
+        run: |
+          mvn -B -f desktop/pom.xml clean package
+          if (-not (Test-Path 'desktop/target/simpletxtsearch-pc-1.2.7-all.jar')) {
+            throw 'Desktop v1.2.7 fat JAR missing'
+          }
+
+      - name: Build portable Windows app
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path desktop/dist | Out-Null
+          jpackage `
+            --type app-image `
+            --name SimpleSearchPC `
+            --input desktop/target `
+            --main-jar simpletxtsearch-pc-1.2.7-all.jar `
+            --main-class com.luxiaoshi.simpletxtsearch.pc.SimpleTxtSearchPcLauncher `
+            --dest desktop/dist `
+            --app-version 1.2.7 `
+            --vendor luxiaoshi838-jpg `
+            --description '简搜 PC 随用版 - 分文件夹分批多线程正文搜索' `
+            --verbose 2>&1 | Tee-Object -FilePath jpackage.log
+          if ($LASTEXITCODE -ne 0) { throw "jpackage failed with exit code $LASTEXITCODE" }
+
+          $appDir = Get-ChildItem desktop/dist -Directory | Select-Object -First 1
+          if (-not $appDir) { throw 'jpackage app image missing' }
+          $exe = Get-ChildItem $appDir.FullName -Filter '*.exe' | Select-Object -First 1
+          if (-not $exe) { throw 'Portable EXE missing' }
+
+          @'
+          简搜 PC 随用版 v1.2.7（分文件夹/分批/多线程正文搜索版）
+
+          核心规则：
+          1. 简搜始终搜索文件正文，不改成文件名搜索。
+          2. 支持 TXT/MD/LOG、PDF、DOC/DOCX/ODT/RTF、XLS/XLSX/ODS/CSV/TSV 正文内容。
+          3. 多关键词为 AND：同一文件正文必须同时包含全部关键词才命中。
+          4. 任务队列单位是“文件夹”，文件夹队列没有总数量上限，会一直扫描到全部范围结束。
+          5. 每个文件夹按“单批任务上限”分批。默认 200，可选/输入 10–5000；这不是总搜索上限。
+          6. 默认最多 4 个正文搜索线程；PDF、旧 DOC、旧 XLS 等重解析格式最多 2 个并发，避免内存峰值和 PageIn 抖动。
+          7. 每批全部完成后，文件流、PDF/Office/XML/RTF 解析器和正文缓冲均已关闭/失去引用，再开始下一批。
+          8. 不逐文件强制 GC；仅在批次结束且堆内存使用达到约 75% 时请求一次 GC，避免清理本身拖慢搜索。
+          9. 搜索结果跨文件夹、跨批次持续累计，不设匹配结果总上限；结果只保留轻量文件路径，不保留正文缓存。
+          10. 单击结果选中；双击结果直接打开原文件。也保留“打开所选文件”“打开所在文件夹”。
+          11. 状态区显示当前文件夹、最近扫描文件、已完成批次数、活动线程和累计结果数。
+          12. 默认排除 runtime/output/build/dist/target/.git/.gradle/node_modules/缓存/旧版/过往不用等无意义目录。
+          13. Maven/JAR/jpackage 版本统一为 1.2.7。
+          '@ | Set-Content -Path (Join-Path $appDir.FullName '使用说明.txt') -Encoding UTF8
+
+          $zip = '简搜_PC_随用版_v1.2.7_分批多线程正文搜索版.zip'
+          Compress-Archive -Path $appDir.FullName -DestinationPath $zip -CompressionLevel Optimal
+          Get-FileHash $zip -Algorithm SHA256 | Format-List | Out-File '简搜_PC_随用版_v1.2.7_分批多线程正文搜索版_SHA256.txt' -Encoding utf8
+
+      - name: Upload portable Windows version
+        uses: actions/upload-artifact@v4
+        with:
+          name: Simpletxtsearch-PC-portable-v1.2.7-folder-batch-content
+          path: |
+            简搜_PC_随用版_v1.2.7_分批多线程正文搜索版.zip
+            简搜_PC_随用版_v1.2.7_分批多线程正文搜索版_SHA256.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Simpletxtsearch-PC-v1.2.7-jpackage-log
+          path: jpackage.log
+          if-no-files-found: warn
+          retention-days: 7
