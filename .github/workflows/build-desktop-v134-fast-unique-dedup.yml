@@ -1,0 +1,117 @@
+name: Build Desktop v1.2.14 Fast Unique Dedup
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - desktop/tools/optimize_content_v134_fast_unique_dedup.py
+      - .github/workflows/build-desktop-v134-fast-unique-dedup.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-portable:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+          cache-dependency-path: desktop/pom.xml
+
+      - name: Apply v1.2.14 fast unique dedup
+        shell: pwsh
+        run: |
+          python desktop/tools/optimize_content_v134_fast_unique_dedup.py
+          $source = Get-Content 'desktop/src/main/java/com/luxiaoshi/simpletxtsearch/pc/SimpleTxtSearchPc.java' -Raw
+          if ($source -notmatch 'FIXED_BATCH_SIZE = 200') { throw 'Fixed 200 batch missing' }
+          if ($source -notmatch 'collectTreeInOrder') { throw 'Ordered top-folder traversal missing' }
+          if ($source -notmatch 'seenFileKeys') { throw 'File dedup set missing' }
+          if ($source -notmatch 'registeredUniqueFiles') { throw 'Unique file counter missing' }
+          if ($source -notmatch 'submittedTasks') { throw 'Submitted task counter missing' }
+          if ($source -notmatch '提交任务数不能超过唯一文件数') { throw 'Task hard invariant missing' }
+          if ($source -notmatch 'toAbsolutePath\(\)\.normalize\(\)') { throw 'Fast path key missing' }
+          if ($source -match 'fileKey\(\)') { throw 'Per-file filesystem fileKey must not remain' }
+          if ($source -match 'files\.sort\(this::comparePathsByName\)') { throw 'Whole-folder file sorting must not remain' }
+          if ($source -notmatch 'ContentSearch.contains') { throw 'Body search missing' }
+          if ($source -notmatch '累计结果') { throw 'Cumulative result UI missing' }
+          if ($source -notmatch 'currentBatchCompleted.incrementAndGet') { throw 'Real batch progress missing' }
+          if ($source -notmatch 'event.getClickCount\(\) == 2') { throw 'Double-click open missing' }
+          if ($source -notmatch 'SEARCH_THREADS') { throw 'Multithreaded search missing' }
+          if ($source -match 'MAX_DISPLAY_RESULTS') { throw 'Result total cap must not exist' }
+          $pom = Get-Content 'desktop/pom.xml' -Raw
+          if ($pom -notmatch '<version>1.2.14</version>') { throw 'Maven version is not 1.2.14' }
+          if ($pom -notmatch '<finalName>simpletxtsearch-pc-1.2.14</finalName>') { throw 'JAR finalName is not 1.2.14' }
+
+      - name: Build fat JAR
+        shell: pwsh
+        run: |
+          mvn -B -f desktop/pom.xml clean package
+          if (-not (Test-Path 'desktop/target/simpletxtsearch-pc-1.2.14-all.jar')) { throw 'Desktop v1.2.14 fat JAR missing' }
+
+      - name: Build portable Windows app
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path desktop/dist | Out-Null
+          jpackage `
+            --type app-image `
+            --name SimpleSearchPC `
+            --input desktop/target `
+            --main-jar simpletxtsearch-pc-1.2.14-all.jar `
+            --main-class com.luxiaoshi.simpletxtsearch.pc.SimpleTxtSearchPcLauncher `
+            --dest desktop/dist `
+            --app-version 1.2.14 `
+            --vendor luxiaoshi838-jpg `
+            --description '简搜 PC - 快速去重 + 固定200正文任务 + 累计结果' `
+            --verbose 2>&1 | Tee-Object -FilePath jpackage.log
+          if ($LASTEXITCODE -ne 0) { throw "jpackage failed with exit code $LASTEXITCODE" }
+
+          $appDir = Get-ChildItem desktop/dist -Directory | Select-Object -First 1
+          if (-not $appDir) { throw 'jpackage app image missing' }
+          $exe = Get-ChildItem $appDir.FullName -Filter '*.exe' | Select-Object -First 1
+          if (-not $exe) { throw 'Portable EXE missing' }
+
+          @'
+          简搜 PC 随用版 v1.2.14
+
+          - 始终搜索文件正文，多关键词仍为 AND。
+          - 同一次搜索中按规范化绝对路径做轻量去重，不再为每个普通文件额外读取 fileKey/toRealPath。
+          - 发现合格文件后立即登记并加入当前200批次，不再先收集并排序整个文件夹的全部文件。
+          - 每批固定最多 200 个文件；凑满即开始正文搜索；最后一批按实际数量显示。
+          - 界面继续显示：唯一文件、已提交、已搜索、当前批、累计结果。
+          - 硬约束：已提交任务数不能超过已登记唯一文件数。
+          - 总文件夹仍按顺序逐个完整处理；子文件夹顺序仍按名称排序。
+          - 搜索结果跨全部批次持续累计，不设总结果上限。
+          - 问题文件夹自动跳过；双击结果直接打开原文件。
+          '@ | Set-Content -Path (Join-Path $appDir.FullName '使用说明.txt') -Encoding UTF8
+
+          $zip = '简搜_PC_随用版_v1.2.14_快速去重正文搜索版.zip'
+          Compress-Archive -Path $appDir.FullName -DestinationPath $zip -CompressionLevel Optimal
+          Get-FileHash $zip -Algorithm SHA256 | Format-List | Out-File '简搜_PC_随用版_v1.2.14_快速去重正文搜索版_SHA256.txt' -Encoding utf8
+
+      - name: Upload portable Windows version
+        uses: actions/upload-artifact@v4
+        with:
+          name: Simpletxtsearch-PC-portable-v1.2.14-fast-unique-dedup
+          path: |
+            简搜_PC_随用版_v1.2.14_快速去重正文搜索版.zip
+            简搜_PC_随用版_v1.2.14_快速去重正文搜索版_SHA256.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Simpletxtsearch-PC-v1.2.14-jpackage-log
+          path: jpackage.log
+          if-no-files-found: warn
+          retention-days: 7
