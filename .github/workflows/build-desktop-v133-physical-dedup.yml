@@ -1,0 +1,115 @@
+name: Build Desktop v1.2.13 Unique Task Accounting
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - desktop/tools/optimize_content_v133_physical_identity_dedup.py
+      - .github/workflows/build-desktop-v133-physical-dedup.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-portable:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+          cache-dependency-path: desktop/pom.xml
+
+      - name: Apply v1.2.13 unique task accounting
+        shell: pwsh
+        run: |
+          python desktop/tools/optimize_content_v133_physical_identity_dedup.py
+          $source = Get-Content 'desktop/src/main/java/com/luxiaoshi/simpletxtsearch/pc/SimpleTxtSearchPc.java' -Raw
+          if ($source -notmatch 'FIXED_BATCH_SIZE = 200') { throw 'Fixed 200 batch missing' }
+          if ($source -notmatch 'collectTreeInOrder') { throw 'Ordered traversal missing' }
+          if ($source -notmatch 'seenFileKeys') { throw 'File dedup set missing' }
+          if ($source -notmatch 'physicalIdentityKey') { throw 'Physical file identity missing' }
+          if ($source -notmatch 'fileKey\(\)') { throw 'Filesystem fileKey missing' }
+          if ($source -notmatch 'registeredUniqueFiles') { throw 'Unique file counter missing' }
+          if ($source -notmatch 'submittedTasks') { throw 'Submitted task counter missing' }
+          if ($source -notmatch '提交任务数不能超过唯一文件数') { throw 'Task hard invariant missing' }
+          if ($source -notmatch 'ContentSearch.contains') { throw 'Body search missing' }
+          if ($source -notmatch '累计结果') { throw 'Cumulative result UI missing' }
+          if ($source -notmatch 'currentBatchCompleted.incrementAndGet') { throw 'Real batch progress missing' }
+          if ($source -notmatch 'event.getClickCount\(\) == 2') { throw 'Double-click open missing' }
+          if ($source -notmatch 'SEARCH_THREADS') { throw 'Multithreaded search missing' }
+          if ($source -match 'MAX_DISPLAY_RESULTS') { throw 'Result total cap must not exist' }
+          $pom = Get-Content 'desktop/pom.xml' -Raw
+          if ($pom -notmatch '<version>1.2.13</version>') { throw 'Maven version is not 1.2.13' }
+          if ($pom -notmatch '<finalName>simpletxtsearch-pc-1.2.13</finalName>') { throw 'JAR finalName is not 1.2.13' }
+
+      - name: Build fat JAR
+        shell: pwsh
+        run: |
+          mvn -B -f desktop/pom.xml clean package
+          if (-not (Test-Path 'desktop/target/simpletxtsearch-pc-1.2.13-all.jar')) { throw 'Desktop v1.2.13 fat JAR missing' }
+
+      - name: Build portable Windows app
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path desktop/dist | Out-Null
+          jpackage `
+            --type app-image `
+            --name SimpleSearchPC `
+            --input desktop/target `
+            --main-jar simpletxtsearch-pc-1.2.13-all.jar `
+            --main-class com.luxiaoshi.simpletxtsearch.pc.SimpleTxtSearchPcLauncher `
+            --dest desktop/dist `
+            --app-version 1.2.13 `
+            --vendor luxiaoshi838-jpg `
+            --description '简搜 PC - 唯一文件登记 + 固定200正文任务 + 累计结果' `
+            --verbose 2>&1 | Tee-Object -FilePath jpackage.log
+          if ($LASTEXITCODE -ne 0) { throw "jpackage failed with exit code $LASTEXITCODE" }
+
+          $appDir = Get-ChildItem desktop/dist -Directory | Select-Object -First 1
+          if (-not $appDir) { throw 'jpackage app image missing' }
+          $exe = Get-ChildItem $appDir.FullName -Filter '*.exe' | Select-Object -First 1
+          if (-not $exe) { throw 'Portable EXE missing' }
+
+          @'
+          简搜 PC 随用版 v1.2.13
+
+          - 始终搜索文件正文，多关键词仍为 AND。
+          - 每个文件进入任务前先做本次搜索唯一登记；同一物理文件只允许提交一次。
+          - 界面分别显示：唯一文件、已提交、已搜索、当前批、累计结果。
+          - 硬约束：已提交任务数不能超过已登记唯一文件数；若内部计数异常会直接报错，不再静默膨胀。
+          - 每批固定最多 200 个文件；最后一批按实际数量显示。
+          - 一个总文件夹及其全部子目录完成后再进入下一个；同级按名称排序。
+          - 搜索结果跨全部批次持续累计，不设总结果上限。
+          - 问题文件夹自动跳过；双击结果直接打开原文件。
+          '@ | Set-Content -Path (Join-Path $appDir.FullName '使用说明.txt') -Encoding UTF8
+
+          $zip = '简搜_PC_随用版_v1.2.13_唯一任务防重复版.zip'
+          Compress-Archive -Path $appDir.FullName -DestinationPath $zip -CompressionLevel Optimal
+          Get-FileHash $zip -Algorithm SHA256 | Format-List | Out-File '简搜_PC_随用版_v1.2.13_唯一任务防重复版_SHA256.txt' -Encoding utf8
+
+      - name: Upload portable Windows version
+        uses: actions/upload-artifact@v4
+        with:
+          name: Simpletxtsearch-PC-portable-v1.2.13-unique-task-accounting
+          path: |
+            简搜_PC_随用版_v1.2.13_唯一任务防重复版.zip
+            简搜_PC_随用版_v1.2.13_唯一任务防重复版_SHA256.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Simpletxtsearch-PC-v1.2.13-jpackage-log
+          path: jpackage.log
+          if-no-files-found: warn
+          retention-days: 7
