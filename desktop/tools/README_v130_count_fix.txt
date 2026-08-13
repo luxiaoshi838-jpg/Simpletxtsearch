@@ -1,0 +1,1 @@
+v1.2.10 build trigger: searched-file count now means files whose body search actually completed; duplicate physical folders are canonicalized and skipped.
