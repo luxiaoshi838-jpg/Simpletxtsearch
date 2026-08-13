@@ -1,0 +1,105 @@
+name: Build Desktop v1.2.1 Large Folder Optimized
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - desktop/tools/optimize_large_folder.py
+      - .github/workflows/build-desktop-v121-large-folder.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-portable:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+          cache-dependency-path: desktop/pom.xml
+
+      - name: Apply large-folder optimization
+        shell: pwsh
+        run: |
+          python desktop/tools/optimize_large_folder.py
+          $source = Get-Content 'desktop/src/main/java/com/luxiaoshi/simpletxtsearch/pc/SimpleTxtSearchPc.java' -Raw
+          if ($source -notmatch 'MAX_FILE_SIZE_BYTES = 50L') { throw 'File-size guard missing' }
+          if ($source -notmatch 'MAX_DISPLAY_RESULTS = 5000') { throw 'Display result cap missing' }
+          if ($source -notmatch 'Files.newDirectoryStream') { throw 'Streaming root traversal missing' }
+          if ($source -notmatch 'STATUS_UPDATE_INTERVAL_NANOS') { throw 'Throttled status updates missing' }
+          if ($source -notmatch 'EXCLUDED_DIRECTORY_NAMES') { throw 'Directory exclusions missing' }
+
+      - name: Build fat JAR
+        shell: pwsh
+        run: |
+          mvn -B -f desktop/pom.xml clean package
+          if (-not (Test-Path 'desktop/target/simpletxtsearch-pc-1.2.0-all.jar')) {
+            throw 'Desktop fat JAR missing'
+          }
+
+      - name: Build portable Windows app
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path desktop/dist | Out-Null
+          jpackage `
+            --type app-image `
+            --name SimpleSearchPC `
+            --input desktop/target `
+            --main-jar simpletxtsearch-pc-1.2.0-all.jar `
+            --main-class com.luxiaoshi.simpletxtsearch.pc.SimpleTxtSearchPcLauncher `
+            --dest desktop/dist `
+            --app-version 1.2.1 `
+            --vendor luxiaoshi838-jpg `
+            --description '简搜 PC 随用版 - 大目录优化' `
+            --verbose 2>&1 | Tee-Object -FilePath jpackage.log
+          if ($LASTEXITCODE -ne 0) { throw "jpackage failed with exit code $LASTEXITCODE" }
+
+          $appDir = Get-ChildItem desktop/dist -Directory | Select-Object -First 1
+          if (-not $appDir) { throw 'jpackage app image missing' }
+          $exe = Get-ChildItem $appDir.FullName -Filter '*.exe' | Select-Object -First 1
+          if (-not $exe) { throw 'Portable EXE missing' }
+
+          @'
+          简搜 PC 随用版 v1.2.1（大目录优化版）
+
+          1. 请完整解压后运行 SimpleSearchPC.exe；不需要另装 Java。
+          2. 搜索会完整扫描所选范围，不会因为结果达到上限而提前停止。
+          3. 根目录不再先累计完整文件列表；扫描文件逐个处理，处理完即不再保留正文内容引用。
+          4. 搜索结果按小批次提交给界面；最多显示前 5000 条，但命中总数继续统计，后台继续扫完整个范围。
+          5. 状态栏限频刷新，避免每个文件都触发一次界面更新。
+          6. 默认排除 .git、node_modules、.venv、venv、__pycache__、build、dist 目录。
+          7. 单文件超过 50 MB 时跳过并单独计数，避免单个超大 Office/PDF/RTF 文件造成明显内存峰值。
+          8. 保留原有 1-10 个关键词 AND 搜索、多格式搜索、两列结果、双击打开文件和打开所在文件夹功能。
+          '@ | Set-Content -Path (Join-Path $appDir.FullName '使用说明.txt') -Encoding UTF8
+
+          $zip = '简搜_PC_随用版_v1.2.1_大目录优化版.zip'
+          Compress-Archive -Path $appDir.FullName -DestinationPath $zip -CompressionLevel Optimal
+          Get-FileHash $zip -Algorithm SHA256 | Format-List | Out-File '简搜_PC_随用版_v1.2.1_大目录优化版_SHA256.txt' -Encoding utf8
+
+      - name: Upload portable Windows version
+        uses: actions/upload-artifact@v4
+        with:
+          name: Simpletxtsearch-PC-portable-v1.2.1-large-folder
+          path: |
+            简搜_PC_随用版_v1.2.1_大目录优化版.zip
+            简搜_PC_随用版_v1.2.1_大目录优化版_SHA256.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Simpletxtsearch-PC-v1.2.1-jpackage-log
+          path: jpackage.log
+          if-no-files-found: warn
+          retention-days: 7
